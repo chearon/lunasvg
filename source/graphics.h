@@ -2,6 +2,7 @@
 #define LUNASVG_GRAPHICS_H
 
 #include <plutovg.h>
+#include <cairo.h>
 
 #include <cstdint>
 #include <algorithm>
@@ -394,67 +395,9 @@ private:
     int m_index;
 };
 
-class FontFace {
-public:
-    FontFace() = default;
-    explicit FontFace(plutovg_font_face_t* face);
-    FontFace(const void* data, size_t length, plutovg_destroy_func_t destroy_func, void* closure);
-    FontFace(const char* filename);
-    FontFace(const FontFace& face);
-    FontFace(FontFace&& face);
-    ~FontFace();
-
-    FontFace& operator=(const FontFace& face);
-    FontFace& operator=(FontFace&& face);
-
-    void swap(FontFace& face);
-
-    bool isNull() const { return m_face == nullptr; }
-    plutovg_font_face_t* get() const { return m_face; }
-
-private:
-    plutovg_font_face_t* release();
-    plutovg_font_face_t* m_face = nullptr;
-};
-
-class FontFaceCache {
-public:
-    bool addFontFace(const std::string& family, bool bold, bool italic, const FontFace& face);
-    FontFace getFontFace(const std::string& family, bool bold, bool italic) const;
-
-private:
-    FontFaceCache();
-    plutovg_font_face_cache_t* m_cache;
-    friend FontFaceCache* fontFaceCache();
-};
-
-FontFaceCache* fontFaceCache();
-
-class Font {
-public:
-    Font() = default;
-    Font(const FontFace& face, float size);
-
-    float ascent() const { return m_ascent; }
-    float descent() const { return m_descent; }
-    float height() const { return m_ascent - m_descent; }
-    float lineGap() const { return m_lineGap; }
-    float xHeight() const;
-
-    float measureText(const std::u32string_view& text) const;
-
-    const FontFace& face() const { return m_face; }
-    float size() const { return m_size; }
-
-    bool isNull() const { return m_size <= 0.f || m_face.isNull(); }
-
-private:
-    FontFace m_face;
-    float m_size = 0.f;
-    float m_ascent = 0.f;
-    float m_descent = 0.f;
-    float m_lineGap = 0.f;
-};
+class FontFace;
+class Font;
+class GraphicsCallbacks;
 
 enum class TextureType {
     Plain = PLUTOVG_TEXTURE_TYPE_PLAIN,
@@ -542,16 +485,16 @@ public:
 
     Rect extents() const { return Rect(m_x, m_y, width(), height()); }
 
-    plutovg_surface_t* surface() const { return m_surface; }
-    plutovg_canvas_t* canvas() const { return m_canvas; }
+    cairo_surface_t* surface() const { return m_surface; }
+    cairo_t* canvas() const { return m_canvas; }
 
     ~Canvas();
 
 private:
     Canvas(const Bitmap& bitmap);
     Canvas(int x, int y, int width, int height);
-    plutovg_surface_t* m_surface;
-    plutovg_canvas_t* m_canvas;
+    cairo_surface_t* m_surface;
+    cairo_t* m_canvas;
     plutovg_matrix_t m_translation;
     const int m_x;
     const int m_y;

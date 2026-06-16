@@ -16,30 +16,15 @@ const char* lunasvg_version_string()
     return LUNASVG_VERSION_STRING;
 }
 
-bool lunasvg_add_font_face_from_file(const char* family, bool bold, bool italic, const char* filename)
-{
-    return lunasvg::fontFaceCache()->addFontFace(family, bold, italic, lunasvg::FontFace(filename));
-}
-
-bool lunasvg_add_font_face_from_data(const char* family, bool bold, bool italic, const void* data, size_t length, lunasvg_destroy_func_t destroy_func, void* closure)
-{
-    return lunasvg::fontFaceCache()->addFontFace(family, bold, italic, lunasvg::FontFace(data, length, destroy_func, closure));
-}
-
 namespace lunasvg {
 
 Bitmap::Bitmap(int width, int height)
-    : m_surface(plutovg_surface_create(width, height))
-{
-}
-
-Bitmap::Bitmap(uint8_t* data, int width, int height, int stride)
-    : m_surface(plutovg_surface_create_for_data(data, width, height, stride))
+    : m_surface(cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height))
 {
 }
 
 Bitmap::Bitmap(const Bitmap& bitmap)
-    : m_surface(plutovg_surface_reference(bitmap.surface()))
+    : m_surface(cairo_surface_reference(bitmap.surface()))
 {
 }
 
@@ -50,7 +35,7 @@ Bitmap::Bitmap(Bitmap&& bitmap)
 
 Bitmap::~Bitmap()
 {
-    plutovg_surface_destroy(m_surface);
+    cairo_surface_destroy(m_surface);
 }
 
 Bitmap& Bitmap::operator=(const Bitmap& bitmap)
@@ -67,28 +52,28 @@ void Bitmap::swap(Bitmap& bitmap)
 uint8_t* Bitmap::data() const
 {
     if(m_surface)
-        return plutovg_surface_get_data(m_surface);
+        return cairo_image_surface_get_data(m_surface);
     return nullptr;
 }
 
 int Bitmap::width() const
 {
     if(m_surface)
-        return plutovg_surface_get_width(m_surface);
+        return cairo_image_surface_get_width(m_surface);
     return 0;
 }
 
 int Bitmap::height() const
 {
     if(m_surface)
-        return plutovg_surface_get_height(m_surface);
+        return cairo_image_surface_get_height(m_surface);
     return 0;
 }
 
 int Bitmap::stride() const
 {
     if(m_surface)
-        return plutovg_surface_get_stride(m_surface);
+        return cairo_image_surface_get_stride(m_surface);
     return 0;
 }
 
@@ -98,18 +83,11 @@ void Bitmap::clear(uint32_t value)
         return;
     plutovg_color_t color;
     plutovg_color_init_rgba32(&color, value);
-    plutovg_surface_clear(m_surface, &color);
-}
-
-void Bitmap::convertToRGBA()
-{
-    if(m_surface == nullptr)
-        return;
-    auto data = plutovg_surface_get_data(m_surface);
-    auto width = plutovg_surface_get_width(m_surface);
-    auto height = plutovg_surface_get_height(m_surface);
-    auto stride = plutovg_surface_get_stride(m_surface);
-    plutovg_convert_argb_to_rgba(data, data, width, height, stride);
+    cairo_t* cr = cairo_create(m_surface);
+    cairo_set_source_rgba(cr, color.r, color.g, color.b, color.a);
+    cairo_rectangle(cr, 0, 0, width(), height());
+    cairo_fill(cr);
+    cairo_destroy(cr);
 }
 
 Bitmap& Bitmap::operator=(Bitmap&& bitmap)
@@ -121,18 +99,11 @@ Bitmap& Bitmap::operator=(Bitmap&& bitmap)
 bool Bitmap::writeToPng(const std::string& filename) const
 {
     if(m_surface)
-        return plutovg_surface_write_to_png(m_surface, filename.data());
+        return cairo_surface_write_to_png(m_surface, filename.data());
     return false;
 }
 
-bool Bitmap::writeToPng(lunasvg_write_func_t callback, void* closure) const
-{
-    if(m_surface)
-        return plutovg_surface_write_to_png_stream(m_surface, callback, closure);
-    return false;
-}
-
-plutovg_surface_t* Bitmap::release()
+cairo_surface_t* Bitmap::release()
 {
     return std::exchange(m_surface, nullptr);
 }
@@ -441,6 +412,15 @@ std::unique_ptr<Document> Document::loadFromData(const char* data)
 std::unique_ptr<Document> Document::loadFromData(const char* data, size_t length)
 {
     std::unique_ptr<Document> document(new Document);
+    if(!document->parse(data, length))
+        return nullptr;
+    return document;
+}
+
+std::unique_ptr<Document> Document::loadFromData(const char* data, size_t length, GraphicsCallbacks callbacks)
+{
+    std::unique_ptr<Document> document(new Document);
+    document->callbacks = callbacks;
     if(!document->parse(data, length))
         return nullptr;
     return document;

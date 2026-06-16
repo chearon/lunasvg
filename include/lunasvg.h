@@ -27,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cairo.h>
 
 #if defined(LUNASVG_BUILD_STATIC)
 #define LUNASVG_EXPORT
@@ -103,29 +104,6 @@ LUNASVG_API int lunasvg_version(void);
  */
 LUNASVG_API const char* lunasvg_version_string(void);
 
-/**
-* @brief Add a font face from a file to the cache.
-* @param family The name of the font family. If an empty string is provided, the font will act as a fallback.
-* @param bold Use `true` for bold, `false` otherwise.
-* @param italic Use `true` for italic, `false` otherwise.
-* @param filename The path to the font file.
-* @return `true` if the font face was successfully added to the cache, `false` otherwise.
-*/
-LUNASVG_API bool lunasvg_add_font_face_from_file(const char* family, bool bold, bool italic, const char* filename);
-
-/**
-* @brief Add a font face from memory to the cache.
-* @param family The name of the font family. If an empty string is provided, the font will act as a fallback.
-* @param bold Use `true` for bold, `false` otherwise.
-* @param italic Use `true` for italic, `false` otherwise.
-* @param data A pointer to the memory buffer containing the font data.
-* @param length The size of the memory buffer in bytes.
-* @param destroy_func Callback function to free the memory buffer when it is no longer needed.
-* @param closure User-defined pointer passed to the `destroy_func` callback.
-* @return `true` if the font face was successfully added to the cache, `false` otherwise.
-*/
-LUNASVG_API bool lunasvg_add_font_face_from_data(const char* family, bool bold, bool italic, const void* data, size_t length, lunasvg_destroy_func_t destroy_func, void* closure);
-
 #ifdef __cplusplus
 }
 #endif
@@ -151,16 +129,6 @@ public:
     Bitmap(int width, int height);
 
     /**
-     * @brief Constructs a bitmap with the provided pixel data, width, height, and stride.
-     *
-     * @param data A pointer to the raw pixel data in ARGB32 Premultiplied format.
-     * @param width The width of the bitmap in pixels.
-     * @param height The height of the bitmap in pixels.
-     * @param stride The number of bytes per row of pixel data (stride).
-    */
-    Bitmap(uint8_t* data, int width, int height, int stride);
-
-    /**
      * @brief Copy constructor.
      * @param bitmap The bitmap to copy.
      */
@@ -175,7 +143,7 @@ public:
     /**
      * @internal
      */
-    Bitmap(plutovg_surface_t* surface) : m_surface(surface) {}
+    Bitmap(cairo_surface_t* surface) : m_surface(surface) {}
 
     /**
      * @brief Cleans up any resources associated with the bitmap.
@@ -233,11 +201,6 @@ public:
     void clear(uint32_t value);
 
     /**
-     * @brief Converts the bitmap pixel data from ARGB32 Premultiplied to RGBA Plain format in place.
-     */
-    void convertToRGBA();
-
-    /**
      * @brief Checks if the bitmap is null.
      * @return True if the bitmap is null, false otherwise.
      */
@@ -258,21 +221,13 @@ public:
     bool writeToPng(const std::string& filename) const;
 
     /**
-     * @brief Writes the bitmap to a PNG stream.
-     * @param callback Callback function for writing data.
-     * @param closure User-defined data passed to the callback.
-     * @return True if successful, false otherwise.
-     */
-    bool writeToPng(lunasvg_write_func_t callback, void* closure) const;
-
-    /**
      * @internal
      */
-    plutovg_surface_t* surface() const { return m_surface; }
+    cairo_surface_t* surface() const { return m_surface; }
 
 private:
-    plutovg_surface_t* release();
-    plutovg_surface_t* m_surface{nullptr};
+    cairo_surface_t* release();
+    cairo_surface_t* m_surface{nullptr};
 };
 
 class Rect;
@@ -662,6 +617,74 @@ using ElementList = std::vector<Element>;
 
 class SVGRootElement;
 
+class Point;
+class LUNASVG_API FontFace {
+public:
+    FontFace() = default;
+    explicit FontFace(cairo_font_face_t* face);
+    FontFace(const FontFace& face);
+    FontFace(FontFace&& face);
+    ~FontFace();
+
+    FontFace& operator=(const FontFace& face);
+    FontFace& operator=(FontFace&& face);
+
+    void swap(FontFace& face);
+
+    bool isNull() const { return m_face == nullptr; }
+    cairo_font_face_t* get() const { return m_face; }
+
+    int32_t m_ascent = 0.f;
+    int32_t m_descent = 0.f;
+    int32_t m_lineGap = 0.f;
+    int32_t m_xHeight = 0.f;
+private:
+    cairo_font_face_t* release();
+    cairo_font_face_t* m_face = nullptr;
+};
+
+class Font {
+public:
+    Font() = default;
+    Font(const FontFace& face, float size);
+
+    float ascent() const { return m_ascent; }
+    float descent() const { return m_descent; }
+    float height() const { return m_ascent - m_descent; }
+    float lineGap() const { return m_lineGap; }
+    float xHeight() const;
+
+    float measureText(const std::u32string_view& text) const;
+    void paintText(const std::u32string_view text, const Point& point, const Transform& transform, float strokeWidth) const;
+
+    const FontFace& face() const { return m_face; }
+    float size() const { return m_size; }
+
+    bool isNull() const { return m_size <= 0.f || m_face.isNull(); }
+
+private:
+    FontFace m_face;
+    float m_size = 0.f;
+    float m_ascent = 0.f;
+    float m_descent = 0.f;
+    float m_lineGap = 0.f;
+    float m_xHeight = 0.f;
+
+    void (*painter)(const std::u32string_view, const Font&, const Point&, const Transform&, float) = nullptr;
+    float (*measurer)(const std::u32string_view, const Font&) = nullptr;
+};
+
+class LUNASVG_API GraphicsCallbacks {
+public:
+    FontFace getFontFace(const std::string& family, bool bold, bool italic) const;
+    cairo_surface_t* createSurfaceForImage(char* data, int length);
+    void setRetrieverFn(FontFace (*fn)(const std::string&, bool, bool));
+    void setDecoderFn(cairo_surface_t* (*fn)(char* data, int length));
+private:
+    FontFace (*retriever)(const std::string&, bool, bool) = nullptr;
+    cairo_surface_t* (*decoder)(char*, int) = nullptr;
+};
+
 class LUNASVG_API Document {
 public:
     /**
@@ -692,6 +715,8 @@ public:
      * @return A pointer to the loaded `Document`, or `nullptr` on failure.
      */
     static std::unique_ptr<Document> loadFromData(const char* data, size_t length);
+
+    static std::unique_ptr<Document> loadFromData(const char* data, size_t length, GraphicsCallbacks callbacks);
 
     /**
      * @brief Applies a CSS stylesheet to the document.
@@ -770,6 +795,8 @@ public:
      * @return The root Element of the document.
      */
     Element documentElement() const;
+
+    GraphicsCallbacks callbacks;
 
     Document(Document&&);
     Document& operator=(Document&&);

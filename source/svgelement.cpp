@@ -897,7 +897,7 @@ void SVGImageElement::render(SVGRenderState& state) const
     newState.endGroup(blendInfo);
 }
 
-static Bitmap loadImageResource(const std::string& href)
+static Bitmap loadImageResource(const std::string& href, GraphicsCallbacks& callbacks)
 {
     if(href.compare(0, 5, "data:") == 0) {
         std::string_view input(href);
@@ -905,16 +905,28 @@ static Bitmap loadImageResource(const std::string& href)
         if(index == std::string_view::npos)
             return Bitmap();
         input.remove_prefix(index + 1);
-        return plutovg_surface_load_from_image_base64(input.data(), input.length());
+
+        char* data = NULL;
+        int length = 0;
+
+        plutovg_surface_load_from_image_base64(input.data(), input.length(), &data, &length);
+
+        if (data != NULL) {
+          cairo_surface_t* surface = callbacks.createSurfaceForImage(data, length);
+          // The Bitmap class assumes the Cairo surface frees the data when it's
+          // destroyed (as if it were always made with cairo_image_surface_create)
+          cairo_surface_set_user_data(surface, nullptr, (void*)data, free);
+          return surface;
+        }
     }
 
-    return plutovg_surface_load_from_image_file(href.data());
+    return Bitmap();
 }
 
 void SVGImageElement::parseAttribute(PropertyID id, const std::string& value)
 {
     if(id == PropertyID::Href) {
-        m_image = loadImageResource(value);
+        m_image = loadImageResource(value, document()->callbacks);
     } else {
         SVGGraphicsElement::parseAttribute(id, value);
     }

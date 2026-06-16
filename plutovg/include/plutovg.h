@@ -24,6 +24,7 @@
 #define PLUTOVG_H
 
 #include <stdbool.h>
+#include <cairo.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1182,7 +1183,7 @@ PLUTOVG_API plutovg_surface_t* plutovg_surface_load_from_image_data(const void* 
  * @param length Length of the data in bytes, or `-1` if null-terminated.
  * @return Pointer to the surface, or `NULL` on failure.
  */
-PLUTOVG_API plutovg_surface_t* plutovg_surface_load_from_image_base64(const char* data, int length);
+PLUTOVG_API void plutovg_surface_load_from_image_base64(const char* data, int length, char** out_output_data, int* out_output_length);
 
 /**
  * @brief Increments the reference count for a surface.

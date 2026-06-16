@@ -576,6 +576,7 @@ Font SVGLayoutState::font() const
 {
     auto bold = m_font_weight == FontWeight::Bold;
     auto italic = m_font_style == FontStyle::Italic;
+    auto callbacks = element()->document()->callbacks;
 
     FontFace face;
     std::string_view input(m_font_family);
@@ -595,12 +596,12 @@ Font SVGLayoutState::font() const
 
         std::string font_family(family);
         if(!font_family.empty()) {
-            face = fontFaceCache()->getFontFace(font_family, bold, italic);
+            face = callbacks.getFontFace(font_family, bold, italic);
         }
     }
 
     if(face.isNull())
-        face = fontFaceCache()->getFontFace(emptyString, bold, italic);
+        face = callbacks.getFontFace(emptyString, bold, italic);
     return Font(face, m_font_size);
 }
 

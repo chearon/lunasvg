@@ -360,23 +360,13 @@ void PathIterator::next()
     m_index += m_elements[m_index].header.length;
 }
 
-FontFace::FontFace(plutovg_font_face_t* face)
-    : m_face(plutovg_font_face_reference(face))
-{
-}
-
-FontFace::FontFace(const void* data, size_t length, plutovg_destroy_func_t destroy_func, void* closure)
-    : m_face(plutovg_font_face_load_from_data(data, length, 0, destroy_func, closure))
-{
-}
-
-FontFace::FontFace(const char* filename)
-    : m_face(plutovg_font_face_load_from_file(filename, 0))
+FontFace::FontFace(cairo_font_face_t* face)
+    : m_face(cairo_font_face_reference(face))
 {
 }
 
 FontFace::FontFace(const FontFace& face)
-    : m_face(plutovg_font_face_reference(face.get()))
+    : m_face(cairo_font_face_reference(face.get()))
 {
 }
 
@@ -387,7 +377,7 @@ FontFace::FontFace(FontFace&& face)
 
 FontFace::~FontFace()
 {
-    plutovg_font_face_destroy(m_face);
+    cairo_font_face_destroy(m_face);
 }
 
 FontFace& FontFace::operator=(const FontFace& face)
@@ -407,85 +397,60 @@ void FontFace::swap(FontFace& face)
     std::swap(m_face, face.m_face);
 }
 
-plutovg_font_face_t* FontFace::release()
+cairo_font_face_t* FontFace::release()
 {
     return std::exchange(m_face, nullptr);
 }
 
-bool FontFaceCache::addFontFace(const std::string& family, bool bold, bool italic, const FontFace& face)
+FontFace GraphicsCallbacks::getFontFace(const std::string& family, bool bold, bool italic) const
 {
-    if(!face.isNull())
-        plutovg_font_face_cache_add(m_cache, family.data(), bold, italic, face.get());
-    return !face.isNull();
-}
-
-FontFace FontFaceCache::getFontFace(const std::string& family, bool bold, bool italic) const
-{
-    if(auto face = plutovg_font_face_cache_get(m_cache, family.data(), bold, italic)) {
-        return FontFace(face);
-    }
-
-    static const struct {
-        const char* generic;
-        const char* fallback;
-    } generic_fallbacks[] = {
-#if defined(__linux__)
-        {"sans-serif", "DejaVu Sans"},
-        {"serif", "DejaVu Serif"},
-        {"monospace", "DejaVu Sans Mono"},
-#else
-        {"sans-serif", "Arial"},
-        {"serif", "Times New Roman"},
-        {"monospace", "Courier New"},
-#endif
-        {"cursive", "Comic Sans MS"},
-        {"fantasy", "Impact"}
-    };
-
-    for(auto value : generic_fallbacks) {
-        if(value.generic == family || family.empty()) {
-            return FontFace(plutovg_font_face_cache_get(m_cache, value.fallback, bold, italic));
-        }
-    }
-
+    if (this->retriever) return this->retriever(family, bold, italic);
     return FontFace();
 }
 
-FontFaceCache::FontFaceCache()
-    : m_cache(plutovg_font_face_cache_create())
-{
-#ifndef LUNASVG_DISABLE_LOAD_SYSTEM_FONTS
-    plutovg_font_face_cache_load_sys(m_cache);
-#endif
+cairo_surface_t* GraphicsCallbacks::createSurfaceForImage(char* data, int length) {
+    if (this->decoder) return this->decoder(data, length);
+    return nullptr;
 }
 
-FontFaceCache* fontFaceCache()
+void GraphicsCallbacks::setRetrieverFn(FontFace (*fn)(const std::string&, bool, bool))
 {
-    static FontFaceCache cache;
-    return &cache;
+    this->retriever = fn;
+}
+
+void GraphicsCallbacks::setDecoderFn(cairo_surface_t* (*fn)(char*, int))
+{
+    this->decoder = fn;
 }
 
 Font::Font(const FontFace& face, float size)
     : m_face(face), m_size(size)
 {
     if(m_size > 0.f && !m_face.isNull()) {
-        plutovg_font_face_get_metrics(m_face.get(), m_size, &m_ascent, &m_descent, &m_lineGap, nullptr);
+        m_ascent = face.m_ascent / 1000.0 * m_size;
+        m_descent = face.m_descent / 1000.0 * m_size;
+        m_lineGap = face.m_lineGap / 1000.0 * m_size;
+        m_xHeight = face.m_xHeight / 1000.0 * m_size;
     }
 }
 
 float Font::xHeight() const
 {
-    plutovg_rect_t extents = {0};
-    if(m_size > 0.f && !m_face.isNull())
-        plutovg_font_face_get_glyph_metrics(m_face.get(), m_size, 'x', nullptr, nullptr, &extents);
-    return extents.h;
+    return m_xHeight;
 }
 
 float Font::measureText(const std::u32string_view& text) const
 {
-    if(m_size > 0.f && !m_face.isNull())
-        return plutovg_font_face_text_extents(m_face.get(), m_size, text.data(), text.length(), PLUTOVG_TEXT_ENCODING_UTF32, nullptr);
+    if(m_size > 0.f && !m_face.isNull() && this->measurer)
+        return (*this->measurer)(text, *this);
     return 0;
+}
+
+void Font::paintText(const std::u32string_view text, const Point& point, const Transform& transform, float strokeWidth) const
+{
+    if (this->painter) {
+        (*this->painter)(text, *this, point, transform, strokeWidth);
+    }
 }
 
 std::shared_ptr<Canvas> Canvas::create(const Bitmap& bitmap)
@@ -517,86 +482,201 @@ void Canvas::setColor(const Color& color)
 
 void Canvas::setColor(float r, float g, float b, float a)
 {
-    plutovg_canvas_set_rgba(m_canvas, r, g, b, a);
+    cairo_set_source_rgba(m_canvas, r, g, b, a);
+}
+
+static cairo_extend_t convert_spread(SpreadMethod spread)
+{
+    switch (spread) {
+        case SpreadMethod::Pad: return CAIRO_EXTEND_PAD;
+        case SpreadMethod::Reflect: return CAIRO_EXTEND_REFLECT;
+        case SpreadMethod::Repeat: return CAIRO_EXTEND_REPEAT;
+    }
+}
+
+static void convert_matrix(cairo_matrix_t* dst, const plutovg_matrix_t* src)
+{
+    dst->xx = src->a;
+    dst->yx = src->b;
+    dst->xy = src->c;
+    dst->yy = src->d;
+    dst->x0 = src->e;
+    dst->y0 = src->f;
+}
+
+static void add_pattern_matrix(cairo_pattern_t* pattern, const plutovg_matrix_t* matrix) {
+  cairo_matrix_t m;
+  convert_matrix(&m, matrix);
+  cairo_matrix_invert(&m);
+  cairo_pattern_set_matrix(pattern, &m);
 }
 
 void Canvas::setLinearGradient(float x1, float y1, float x2, float y2, SpreadMethod spread, const GradientStops& stops, const Transform& transform)
 {
-    plutovg_canvas_set_linear_gradient(m_canvas, x1, y1, x2, y2, static_cast<plutovg_spread_method_t>(spread), stops.data(), stops.size(), &transform.matrix());
+    cairo_pattern_t* gradient = cairo_pattern_create_linear(x1, y1, x2, y2);
+    for (auto& stop : stops) {
+      cairo_pattern_add_color_stop_rgba(
+          gradient,
+          stop.offset,
+          stop.color.r,
+          stop.color.g,
+          stop.color.b,
+          stop.color.a
+      );
+    }
+    cairo_pattern_set_extend(gradient, convert_spread(spread));
+    add_pattern_matrix(gradient, &transform.matrix());
+    cairo_set_source(m_canvas, gradient);
+    cairo_pattern_destroy(gradient);
+}
+
+static cairo_extend_t convert_texture_type(TextureType type) {
+    switch (type) {
+        case TextureType::Plain: return CAIRO_EXTEND_NONE;
+        case TextureType::Tiled: return CAIRO_EXTEND_REPEAT;
+    }
 }
 
 void Canvas::setRadialGradient(float cx, float cy, float r, float fx, float fy, SpreadMethod spread, const GradientStops& stops, const Transform& transform)
 {
-    plutovg_canvas_set_radial_gradient(m_canvas, cx, cy, r, fx, fy, 0.f, static_cast<plutovg_spread_method_t>(spread), stops.data(), stops.size(), &transform.matrix());
+    cairo_pattern_t* gradient = cairo_pattern_create_radial(cx, cy, 0, fx, fy, r);
+    for (auto& stop : stops) {
+      cairo_pattern_add_color_stop_rgba(
+          gradient,
+          stop.offset,
+          stop.color.r,
+          stop.color.g,
+          stop.color.b,
+          stop.color.a
+      );
+    }
+    cairo_pattern_set_extend(gradient, convert_spread(spread));
+    add_pattern_matrix(gradient, &transform.matrix());
+    cairo_set_source(m_canvas, gradient);
+    cairo_pattern_destroy(gradient);
 }
 
 void Canvas::setTexture(const Canvas& source, TextureType type, float opacity, const Transform& transform)
 {
-    plutovg_canvas_set_texture(m_canvas, source.surface(), static_cast<plutovg_texture_type_t>(type), opacity, &transform.matrix());
+    cairo_pattern_t* texture = cairo_pattern_create_for_surface(source.surface());
+    cairo_pattern_set_extend(texture, convert_texture_type(type));
+    add_pattern_matrix(texture, &transform.matrix());
+    cairo_set_source(m_canvas, texture);
+    cairo_pattern_destroy(texture);
+}
+
+static cairo_fill_rule_t convert_fill_rule(FillRule rule) {
+    switch (rule) {
+        case FillRule::NonZero: return CAIRO_FILL_RULE_WINDING;
+        case FillRule::EvenOdd: return CAIRO_FILL_RULE_EVEN_ODD;
+    }
+}
+
+static void add_path(cairo_t* cr, const Path& path) {
+    PathIterator it(path);
+    std::array<Point, 3> p;
+
+    while(!it.isDone()) {
+        switch(it.currentSegment(p)) {
+            case PathCommand::MoveTo:
+                cairo_move_to(cr, p[0].x, p[0].y);
+                break;
+            case PathCommand::LineTo:
+                cairo_line_to(cr, p[0].x, p[0].y);
+                break;
+            case PathCommand::CubicTo:
+                cairo_curve_to(cr, p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y);
+                break;
+            case PathCommand::Close:
+                cairo_close_path(cr);
+                break;
+        }
+
+        it.next();
+    }
+}
+
+static void add_matrix(cairo_t* cr, const plutovg_matrix_t* p_m1, const plutovg_matrix_t* p_m2) {
+    cairo_matrix_t m1;
+    convert_matrix(&m1, p_m1);
+    cairo_set_matrix(cr, &m1);
+    if (p_m2 != nullptr) { 
+      cairo_matrix_t m2;
+      convert_matrix(&m2, p_m2);
+      cairo_transform(cr, &m2);
+    }
 }
 
 void Canvas::fillPath(const Path& path, FillRule fillRule, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_fill_rule(m_canvas, static_cast<plutovg_fill_rule_t>(fillRule));
-    plutovg_canvas_set_operator(m_canvas, PLUTOVG_OPERATOR_SRC_OVER);
-    plutovg_canvas_fill_path(m_canvas, path.data());
+    add_matrix(m_canvas, &m_translation, &transform.matrix());
+    cairo_set_fill_rule(m_canvas, convert_fill_rule(fillRule));
+    add_path(m_canvas, path);
+    cairo_fill(m_canvas);
+}
+
+static cairo_line_cap_t convert_line_cap(LineCap cap) {
+    switch (cap) {
+        case LineCap::Butt: return CAIRO_LINE_CAP_BUTT;
+        case LineCap::Round: return CAIRO_LINE_CAP_ROUND;
+        case LineCap::Square: return CAIRO_LINE_CAP_SQUARE;
+    }
+}
+
+static cairo_line_join_t convert_line_join(LineJoin join) {
+    switch (join) {
+        case LineJoin::Miter: return CAIRO_LINE_JOIN_MITER;
+        case LineJoin::Round: return CAIRO_LINE_JOIN_ROUND;
+        case LineJoin::Bevel: return CAIRO_LINE_JOIN_BEVEL;
+    }
 }
 
 void Canvas::strokePath(const Path& path, const StrokeData& strokeData, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_line_width(m_canvas, strokeData.lineWidth());
-    plutovg_canvas_set_miter_limit(m_canvas, strokeData.miterLimit());
-    plutovg_canvas_set_line_cap(m_canvas, static_cast<plutovg_line_cap_t>(strokeData.lineCap()));
-    plutovg_canvas_set_line_join(m_canvas, static_cast<plutovg_line_join_t>(strokeData.lineJoin()));
-    plutovg_canvas_set_dash_offset(m_canvas, strokeData.dashOffset());
-    plutovg_canvas_set_dash_array(m_canvas, strokeData.dashArray().data(), strokeData.dashArray().size());
-    plutovg_canvas_set_operator(m_canvas, PLUTOVG_OPERATOR_SRC_OVER);
-    plutovg_canvas_stroke_path(m_canvas, path.data());
+    double dashes[256];
+    size_t dash_idx = 0;
+
+    add_matrix(m_canvas, &m_translation, &transform.matrix());
+    cairo_set_line_width(m_canvas, strokeData.lineWidth());
+    cairo_set_miter_limit(m_canvas, strokeData.miterLimit());
+    cairo_set_line_cap(m_canvas, convert_line_cap(strokeData.lineCap()));
+    cairo_set_line_join(m_canvas, convert_line_join(strokeData.lineJoin()));
+
+    for (float dash : strokeData.dashArray()) {
+      if (dash_idx < (sizeof(dashes) / sizeof(dashes[0]))) {
+        dashes[dash_idx++] = (double)dash;
+      } else break;
+    }
+
+    cairo_set_dash(m_canvas, dashes, dash_idx, strokeData.dashOffset());
+    add_path(m_canvas, path);
+    cairo_stroke(m_canvas);
 }
 
 void Canvas::fillText(const std::u32string_view& text, const Font& font, const Point& origin, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_fill_rule(m_canvas, PLUTOVG_FILL_RULE_NON_ZERO);
-    plutovg_canvas_set_operator(m_canvas, PLUTOVG_OPERATOR_SRC_OVER);
-    plutovg_canvas_set_font(m_canvas, font.face().get(), font.size());
-    plutovg_canvas_fill_text(m_canvas, text.data(), text.length(), PLUTOVG_TEXT_ENCODING_UTF32, origin.x, origin.y);
+  font.paintText(text, origin, transform, -1);
 }
 
 void Canvas::strokeText(const std::u32string_view& text, float strokeWidth, const Font& font, const Point& origin, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_line_width(m_canvas, strokeWidth);
-    plutovg_canvas_set_miter_limit(m_canvas, 4.f);
-    plutovg_canvas_set_line_cap(m_canvas, PLUTOVG_LINE_CAP_BUTT);
-    plutovg_canvas_set_line_join(m_canvas, PLUTOVG_LINE_JOIN_MITER);
-    plutovg_canvas_set_dash_offset(m_canvas, 0.f);
-    plutovg_canvas_set_dash_array(m_canvas, nullptr, 0);
-    plutovg_canvas_set_operator(m_canvas, PLUTOVG_OPERATOR_SRC_OVER);
-    plutovg_canvas_set_font(m_canvas, font.face().get(), font.size());
-    plutovg_canvas_stroke_text(m_canvas, text.data(), text.length(), PLUTOVG_TEXT_ENCODING_UTF32, origin.x, origin.y);
+  font.paintText(text, origin, transform, strokeWidth);
 }
 
 void Canvas::clipPath(const Path& path, FillRule clipRule, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_fill_rule(m_canvas, static_cast<plutovg_fill_rule_t>(clipRule));
-    plutovg_canvas_clip_path(m_canvas, path.data());
+    add_matrix(m_canvas, &m_translation, &transform.matrix());
+    cairo_set_fill_rule(m_canvas, convert_fill_rule(clipRule));
+    add_path(m_canvas, path);
+    cairo_clip(m_canvas);
 }
 
 void Canvas::clipRect(const Rect& rect, FillRule clipRule, const Transform& transform)
 {
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_set_fill_rule(m_canvas, static_cast<plutovg_fill_rule_t>(clipRule));
-    plutovg_canvas_clip_rect(m_canvas, rect.x, rect.y, rect.w, rect.h);
+    add_matrix(m_canvas, &m_translation, &transform.matrix());
+    cairo_set_fill_rule(m_canvas, convert_fill_rule(clipRule));
+    cairo_rectangle(m_canvas, rect.x, rect.y, rect.w, rect.h);
+    cairo_clip(m_canvas);
 }
 
 void Canvas::drawImage(const Bitmap& image, const Rect& dstRect, const Rect& srcRect, const Transform& transform)
@@ -604,50 +684,65 @@ void Canvas::drawImage(const Bitmap& image, const Rect& dstRect, const Rect& src
     auto xScale = dstRect.w / srcRect.w;
     auto yScale = dstRect.h / srcRect.h;
     plutovg_matrix_t matrix = { xScale, 0, 0, yScale, -srcRect.x * xScale, -srcRect.y * yScale };
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_transform(m_canvas, &transform.matrix());
-    plutovg_canvas_translate(m_canvas, dstRect.x, dstRect.y);
-    plutovg_canvas_set_fill_rule(m_canvas, PLUTOVG_FILL_RULE_NON_ZERO);
-    plutovg_canvas_set_operator(m_canvas, PLUTOVG_OPERATOR_SRC_OVER);
-    plutovg_canvas_set_texture(m_canvas, image.surface(), PLUTOVG_TEXTURE_TYPE_PLAIN, 1.f, &matrix);
-    plutovg_canvas_fill_rect(m_canvas, 0, 0, dstRect.w, dstRect.h);
+    add_matrix(m_canvas, &m_translation, &transform.matrix());
+    cairo_translate(m_canvas, dstRect.x, dstRect.y);
+    cairo_set_fill_rule(m_canvas, CAIRO_FILL_RULE_WINDING);
+    cairo_pattern_t* texture = cairo_pattern_create_for_surface(image.surface());
+    cairo_pattern_set_extend(texture, CAIRO_EXTEND_REPEAT);
+    add_pattern_matrix(texture, &matrix);
+    cairo_set_source(m_canvas, texture);
+    cairo_pattern_destroy(texture);
+    cairo_rectangle(m_canvas, 0, 0, dstRect.w, dstRect.h);
+    cairo_fill(m_canvas);
+}
+
+static cairo_operator_t convert_blend(BlendMode mode) {
+    switch (mode) {
+        case BlendMode::Src: return CAIRO_OPERATOR_SOURCE;
+        case BlendMode::Src_Over: return CAIRO_OPERATOR_OVER;
+        case BlendMode::Dst_In: return CAIRO_OPERATOR_DEST_IN;
+        case BlendMode::Dst_Out: return CAIRO_OPERATOR_DEST_OUT;
+    }
 }
 
 void Canvas::blendCanvas(const Canvas& canvas, BlendMode blendMode, float opacity)
 {
     plutovg_matrix_t matrix = { 1, 0, 0, 1, static_cast<float>(canvas.x()), static_cast<float>(canvas.y()) };
-    plutovg_canvas_set_matrix(m_canvas, &m_translation);
-    plutovg_canvas_set_operator(m_canvas, static_cast<plutovg_operator_t>(blendMode));
-    plutovg_canvas_set_texture(m_canvas, canvas.surface(), PLUTOVG_TEXTURE_TYPE_PLAIN, opacity, &matrix);
-    plutovg_canvas_paint(m_canvas);
+    add_matrix(m_canvas, &m_translation, nullptr);
+    cairo_set_operator(m_canvas, convert_blend(blendMode));
+    cairo_pattern_t* pattern = cairo_pattern_create_for_surface(canvas.surface());
+    add_pattern_matrix(pattern, &matrix);
+    cairo_set_source(m_canvas, pattern);
+    cairo_pattern_destroy(pattern);
+    cairo_paint_with_alpha(m_canvas, opacity);
 }
 
 void Canvas::save()
 {
-    plutovg_canvas_save(m_canvas);
+    cairo_save(m_canvas);
 }
 
 void Canvas::restore()
 {
-    plutovg_canvas_restore(m_canvas);
+    cairo_restore(m_canvas);
 }
 
 int Canvas::width() const
 {
-    return plutovg_surface_get_width(m_surface);
+    return cairo_image_surface_get_width(m_surface);
 }
 
 int Canvas::height() const
 {
-    return plutovg_surface_get_height(m_surface);
+    return cairo_image_surface_get_height(m_surface);
 }
 
 void Canvas::convertToLuminanceMask()
 {
-    auto width = plutovg_surface_get_width(m_surface);
-    auto height = plutovg_surface_get_height(m_surface);
-    auto stride = plutovg_surface_get_stride(m_surface);
-    auto data = plutovg_surface_get_data(m_surface);
+    auto width = cairo_image_surface_get_width(m_surface);
+    auto height = cairo_image_surface_get_height(m_surface);
+    auto stride = cairo_image_surface_get_stride(m_surface);
+    auto data = cairo_image_surface_get_data(m_surface);
     for(int y = 0; y < height; y++) {
         auto pixels = reinterpret_cast<uint32_t*>(data + stride * y);
         for(int x = 0; x < width; x++) {
@@ -670,21 +765,21 @@ void Canvas::convertToLuminanceMask()
 
 Canvas::~Canvas()
 {
-    plutovg_canvas_destroy(m_canvas);
-    plutovg_surface_destroy(m_surface);
+    cairo_destroy(m_canvas);
+    cairo_surface_destroy(m_surface);
 }
 
 Canvas::Canvas(const Bitmap& bitmap)
-    : m_surface(plutovg_surface_reference(bitmap.surface()))
-    , m_canvas(plutovg_canvas_create(m_surface))
+    : m_surface(cairo_surface_reference(bitmap.surface()))
+    , m_canvas(cairo_create(m_surface))
     , m_translation({1, 0, 0, 1, 0, 0})
     , m_x(0), m_y(0)
 {
 }
 
 Canvas::Canvas(int x, int y, int width, int height)
-    : m_surface(plutovg_surface_create(width, height))
-    , m_canvas(plutovg_canvas_create(m_surface))
+    : m_surface(cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height))
+    , m_canvas(cairo_create(m_surface))
     , m_translation({1, 0, 0, 1, -static_cast<float>(x), -static_cast<float>(y)})
     , m_x(x), m_y(y)
 {

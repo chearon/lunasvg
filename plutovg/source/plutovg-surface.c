@@ -91,9 +91,8 @@ static const uint8_t base64_table[128] = {
     0x31, 0x32, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-plutovg_surface_t* plutovg_surface_load_from_image_base64(const char* data, int length)
+void plutovg_surface_load_from_image_base64(const char* data, int length, char** out_output_data, int* out_output_length)
 {
-    plutovg_surface_t* surface = NULL;
     uint8_t* output_data = NULL;
     size_t output_length = 0;
 
@@ -104,8 +103,11 @@ plutovg_surface_t* plutovg_surface_load_from_image_base64(const char* data, int 
     if(length == -1)
         length = strlen(data);
     output_data = malloc(length);
-    if(output_data == NULL)
-        return NULL;
+    if(output_data == NULL) {
+        *out_output_data = NULL;
+        *out_output_length = 0;
+        return;
+    }
     for(int i = 0; i < length; ++i) {
         uint8_t cc = data[i];
         if(cc == '=') {
@@ -121,7 +123,7 @@ plutovg_surface_t* plutovg_surface_load_from_image_base64(const char* data, int 
 
     if(output_length == 0 || equals_sign_count > 2 || (output_length % 4) == 1)
         goto cleanup;
-    output_length -= (output_length + 3) / 4;
+    output_length -= ((long long)output_length + 3) / 4;
     if(output_length == 0) {
         goto cleanup;
     }
@@ -142,10 +144,14 @@ plutovg_surface_t* plutovg_surface_load_from_image_base64(const char* data, int 
         output_data[didx] = (((output_data[sidx + 1] << 4) & 255) | ((output_data[sidx + 2] >> 2) & 017));
     }
 
-    surface = plutovg_surface_load_from_image_data(output_data, output_length);
+    *out_output_data = (char*)output_data;
+    // overflow note: output_length can't be greater than length, already an int
+    *out_output_length = (int)output_length;
+    return;
 cleanup:
     free(output_data);
-    return surface;
+    *out_output_data = NULL;
+    *out_output_length = 0;
 }
 
 plutovg_surface_t* plutovg_surface_reference(plutovg_surface_t* surface)
